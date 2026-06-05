@@ -18,7 +18,8 @@ def get_participants(race_id, event_id):
         },
         headers={"X-RSU-API-SECRET": os.getenv("RUNSIGNUP_API_SECRET")},
     )
-    return response.json()
+    data = response.json()
+    return data[0]["participants"]
 
 
 def parse_participant(p):

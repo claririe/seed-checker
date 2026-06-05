@@ -1,3 +1,7 @@
 server/venv/
 server/.env
 node_modules/
+server/seed_checker.db
+server/test.csv
+server/__pycache__/
+.DS_Store

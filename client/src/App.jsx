@@ -3,9 +3,11 @@ import { useState, useEffect } from "react"
 function App() {
   const [participants, setParticipants] = useState([])
   const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [uploadResult, setUploadResult] = useState(null)
 
   useEffect(() => {
-    fetch("http://127.0.0.1:5001/test-participants")
+    fetch("http://127.0.0.1:5001/participants")
       .then(res => res.json())
       .then(data => {
         setParticipants(data)
@@ -13,11 +15,38 @@ function App() {
       })
   }, [])
 
+  function handleUpload(e) {
+    const file = e.target.files[0]
+    if (!file) return
+
+    setUploading(true)
+    const formData = new FormData()
+    formData.append("file", file)
+
+    fetch("http://127.0.0.1:5001/upload-csv", {
+      method: "POST",
+      body: formData
+    })
+      .then(res => res.json())
+      .then(data => {
+        setUploadResult(data.inserted)
+        setUploading(false)
+        fetch("http://127.0.0.1:5001/participants")
+          .then(res => res.json())
+          .then(data => setParticipants(data))
+      })
+  }
+
   if (loading) return <p>Loading...</p>
 
   return (
     <div style={{ padding: "20px" }}>
       <h1>Seed Checker</h1>
+      <div>
+        <input type="file" accept=".csv" onChange={handleUpload} />
+        {uploading && <p>Uploading...</p>}
+        {uploadResult && <p>Loaded {uploadResult} participants</p>}
+      </div>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>
