@@ -1,4 +1,5 @@
 from flask import Flask
+from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 from runsignup import get_participants, parse_participant
@@ -8,13 +9,16 @@ print("KEY:", os.getenv("RUNSIGNUP_API_KEY"))
 print("SECRET:", os.getenv("RUNSIGNUP_API_SECRET"))
 
 app = Flask(__name__)
+CORS(app)
 
 API_KEY = os.getenv("RUNSIGNUP_API_KEY")
 API_SECRET = os.getenv("RUNSIGNUP_API_SECRET")
 
+
 @app.route("/ping")
 def ping():
     return {"message": "server is running"}
+
 
 @app.route("/test-participants")
 def test_participants():
@@ -22,5 +26,6 @@ def test_participants():
     participants = [parse_participant(p) for p in data[0]["participants"]]
     return participants
 
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
