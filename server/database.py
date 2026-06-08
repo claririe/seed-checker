@@ -1,6 +1,7 @@
 import sqlite3
+import os
 
-DB_PATH = "seed_checker.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed_checker.db")
 
 
 def get_db():
@@ -31,6 +32,9 @@ def init_db():
         conn.execute("ALTER TABLE participants ADD COLUMN override_status TEXT")
     except Exception:
         pass
+    conn.execute(
+        "UPDATE participants SET override_status = 'REVIEW' WHERE override_status = 'NEED TO GOOGLE'"
+    )
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS past_results (
@@ -47,6 +51,11 @@ def init_db():
             UNIQUE(year, first_name, last_name, age, gender)
         )
     """)
+
+    try:
+        conn.execute("ALTER TABLE past_results ADD COLUMN bib_number TEXT")
+    except Exception:
+        pass
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (

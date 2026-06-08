@@ -1,0 +1,8 @@
+Flask
+Flask-Cors
+gunicorn
+openpyxl
+pandas
+python-dotenv
+rapidfuzz
+requests

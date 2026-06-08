@@ -14,7 +14,11 @@ def time_to_seconds(t):
         if len(parts) == 3:
             return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
         if len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
+            first = int(parts[0])
+            second = int(parts[1])
+            if first <= 3 and len(parts[0]) == 1:
+                return first * 3600 + second * 60
+            return first * 60 + second
     except ValueError:
         pass
     return None
@@ -131,16 +135,16 @@ def find_past_results(participant, leeway_seconds=300):
 
 def classify(seed_time, past_best_str, past_best_year, matches, leeway_seconds):
     if not matches:
-        return "NEED TO GOOGLE", "No past Boilermaker results found"
+        return "REVIEW", "No past Boilermaker results found"
 
     seed_sec = time_to_seconds(seed_time)
     best_sec = time_to_seconds(past_best_str)
 
     if seed_sec is None:
-        return "NEED TO GOOGLE", "Seed time missing or unreadable"
+        return "REVIEW", "Seed time missing or unreadable"
 
     if best_sec is None:
-        return "NEED TO GOOGLE", "Past results found but times unreadable"
+        return "REVIEW", "Past results found but times unreadable"
 
     round_hour = seed_sec % 3600 == 0
     gap = best_sec - seed_sec
@@ -160,7 +164,7 @@ def enrich_participants(leeway_seconds=300):
     conn = get_db()
     rows = conn.execute("""
         SELECT registration_id, first_name, last_name, age, gender,
-               city, state, seed_time, first_boilermaker
+               city, state, seed_time, first_boilermaker, override_status
         FROM participants
         ORDER BY seed_time ASC
     """).fetchall()
