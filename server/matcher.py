@@ -1,4 +1,5 @@
 import datetime
+from collections import defaultdict
 from rapidfuzz import fuzz
 from database import get_db
 
@@ -20,7 +21,7 @@ def time_to_seconds(t):
                 return first * 3600 + second * 60
             return first * 60 + second
     except ValueError:
-        pass
+        return None
     return None
 
 
@@ -61,24 +62,61 @@ def age_matches(current_age, past_age, past_year):
         return True
 
 
-def find_past_results(participant, leeway_seconds=300):
+def load_history():
     conn = get_db()
-    all_rows = conn.execute("""
-        SELECT year, first_name, last_name, age, gender, city, net_time, bib_number
-        FROM past_results
-        ORDER BY year DESC
-    """).fetchall()
+    race_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'race_id'"
+    ).fetchone()
+    distance_row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'event_distance'"
+    ).fetchone()
+    race_id = int(race_row["value"]) if race_row else 13089
+    distance = distance_row["value"] if distance_row else ""
+    if distance:
+        all_rows = conn.execute("""
+            SELECT year, first_name, last_name, age, gender, city, net_time,
+                   bib_number, race_name, event_name, distance
+            FROM past_results
+            WHERE LOWER(distance) = LOWER(?)
+            ORDER BY year DESC
+        """, (distance,)).fetchall()
+    else:
+        all_rows = conn.execute("""
+            SELECT year, first_name, last_name, age, gender, city, net_time,
+                   bib_number, race_name, event_name, distance
+            FROM past_results WHERE race_id = ? ORDER BY year DESC
+        """, (race_id,)).fetchall()
+    history = [dict(row) for row in all_rows]
     conn.close()
+    by_last_name = defaultdict(list)
+    for result in history:
+        last_name = (result.get("last_name") or "").lower().strip()
+        if last_name:
+            by_last_name[last_name].append(result)
+    return history, by_last_name
+
+
+def find_past_results(
+    participant, leeway_seconds=300, history=None, history_by_last_name=None
+):
+    if history is None or history_by_last_name is None:
+        history, history_by_last_name = load_history()
 
     p_first = (participant.get("first_name") or "").strip()
     p_last = (participant.get("last_name") or "").strip()
     p_gender = (participant.get("gender") or "").upper().strip()
     p_age = participant.get("age")
-    p_seed = participant.get("seed_time")
+    p_seed = participant.get("runsignup_seed")
+    if not participant.get("runsignup_checked"):
+        p_seed = participant.get("uploaded_seed")
+
+    exact_last_name = p_last.lower()
+    candidates = history_by_last_name.get(exact_last_name)
+    if candidates is None:
+        candidates = history
 
     matches = []
-    for row in all_rows:
-        r = dict(row)
+    for r in candidates:
 
         if last_name_score(p_last, r["last_name"]) < NAME_SCORE_THRESHOLD:
             continue
@@ -105,6 +143,9 @@ def find_past_results(participant, leeway_seconds=300):
                 "age": r["age"],
                 "gender": r["gender"],
                 "city": r["city"],
+                "race_name": r.get("race_name") or "",
+                "event_name": r.get("event_name") or "",
+                "distance": r.get("distance") or "",
                 "score": score,
             }
         )
@@ -134,21 +175,21 @@ def find_past_results(participant, leeway_seconds=300):
 
 
 def classify(seed_time, past_best_str, past_best_year, matches, leeway_seconds):
-    if not matches:
-        return "REVIEW", "No past Boilermaker results found"
-
     seed_sec = time_to_seconds(seed_time)
-    best_sec = time_to_seconds(past_best_str)
-
     if seed_sec is None:
         return "REVIEW", "Seed time missing or unreadable"
+
+    if not matches:
+        return "REVIEW", "No matching past results found"
+
+    best_sec = time_to_seconds(past_best_str)
 
     if best_sec is None:
         return "REVIEW", "Past results found but times unreadable"
 
     round_hour = seed_sec % 3600 == 0
     gap = best_sec - seed_sec
-    flag = " ⚑ round-hour seed" if round_hour else ""
+    flag = " (round-hour seed)" if round_hour else ""
 
     if gap <= leeway_seconds:
         return "GOOD", f"Best: {past_best_str} ({past_best_year}){flag}"
@@ -156,24 +197,59 @@ def classify(seed_time, past_best_str, past_best_year, matches, leeway_seconds):
         gap_str = seconds_to_display(abs(gap))
         return (
             "LIAR",
-            f"Best: {past_best_str} ({past_best_year}) — {gap_str} slower than seed{flag}",
+            f"Best: {past_best_str} ({past_best_year}); {gap_str} slower than seed{flag}",
         )
 
 
-def enrich_participants(leeway_seconds=300):
+def enrich_participants(leeway_seconds=300, limit=None, range_start=None, range_end=None):
     conn = get_db()
     rows = conn.execute("""
         SELECT registration_id, first_name, last_name, age, gender,
-               city, state, seed_time, first_boilermaker, override_status
+               city, state, uploaded_seed, runsignup_seed,
+               runsignup_checked, override_status
         FROM participants
-        ORDER BY seed_time ASC
+        ORDER BY CASE WHEN runsignup_checked = 1
+                      THEN runsignup_seed ELSE uploaded_seed END ASC
     """).fetchall()
     conn.close()
 
+    participants = [dict(row) for row in rows]
+    participants.sort(
+        key=lambda participant: (
+            time_to_seconds(
+                participant["runsignup_seed"]
+                if participant["runsignup_checked"]
+                else participant["uploaded_seed"]
+            )
+            is None,
+            time_to_seconds(
+                participant["runsignup_seed"]
+                if participant["runsignup_checked"]
+                else participant["uploaded_seed"]
+            )
+            or 0,
+        )
+    )
+    start_seconds = time_to_seconds(range_start)
+    end_seconds = time_to_seconds(range_end)
+    if start_seconds is not None and end_seconds is not None:
+        participants = [
+            participant for participant in participants
+            if (seed_seconds := time_to_seconds(
+                participant["runsignup_seed"]
+                if participant["runsignup_checked"]
+                else participant["uploaded_seed"]
+            )) is not None and start_seconds <= seed_seconds <= end_seconds
+        ]
+    elif limit is not None:
+        participants = participants[:max(0, int(limit))]
+
+    history, history_by_last_name = load_history()
     results = []
-    for row in rows:
-        p = dict(row)
-        enriched = find_past_results(p, leeway_seconds)
+    for p in participants:
+        enriched = find_past_results(
+            p, leeway_seconds, history, history_by_last_name
+        )
         results.append(
             {
                 **p,

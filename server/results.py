@@ -1,21 +1,8 @@
-import os
 import time
 import threading
 import requests
-from database import get_db
+from database import get_db, normalize_seed_time
 
-BOILERMAKER_15K_EVENTS = [
-    {"year": 2025, "event_id": 877558, "result_set_id": 566346},
-    {"year": 2024, "event_id": 744809, "result_set_id": 472794},
-    {"year": 2023, "event_id": 632176, "result_set_id": 392463},
-    {"year": 2022, "event_id": 576499, "result_set_id": 327766},
-    {"year": 2021, "event_id": 462222, "result_set_id": 281380},
-    {"year": 2020, "event_id": 360351, "result_set_id": 200121},
-    {"year": 2019, "event_id": 263840, "result_set_id": 163651},
-    {"year": 2018, "event_id": 190269, "result_set_id": 124051},
-]
-
-RACE_ID = 13089
 BASE_URL = "https://api.runsignup.com/rest"
 
 _import_state = {
@@ -24,41 +11,58 @@ _import_state = {
     "completed": [],
     "errors": [],
     "last_error_detail": None,
+    "total_events": 0,
 }
 
 
-def _params(extra=None):
-    p = {"rsu_api_key": os.getenv("RUNSIGNUP_API_KEY"), "format": "json"}
+def _params(api_key, extra=None):
+    p = {"rsu_api_key": api_key, "format": "json"}
     if extra:
         p.update(extra)
     return p
 
 
-def _headers():
-    return {"X-RSU-API-SECRET": os.getenv("RUNSIGNUP_API_SECRET")}
+def _headers(api_secret):
+    return {"X-RSU-API-SECRET": api_secret}
 
 
-def get_result_set_id(event_id):
-    url = f"{BASE_URL}/race/{RACE_ID}/results/get-result-sets"
+def _response_json(response):
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        error = data["error"]
+        if isinstance(error, dict):
+            raise RuntimeError(error.get("error_msg") or "RunSignup results request failed")
+        raise RuntimeError(str(error))
+    return data
+
+
+def get_result_set_id(race_id, event_id, api_key, api_secret):
+    url = f"{BASE_URL}/race/{race_id}/results/get-result-sets"
     resp = requests.get(
-        url, params=_params({"event_id": event_id}), headers=_headers(), timeout=15
+        url,
+        params=_params(api_key, {"event_id": event_id}),
+        headers=_headers(api_secret),
+        timeout=15,
     )
-    resp.raise_for_status()
-    sets = resp.json().get("individual_results_sets", [])
+    sets = _response_json(resp).get("individual_results_sets", [])
     if not sets:
         return None
     for result_set in sets:
         name = (result_set.get("individual_result_set_name") or "").lower()
-        if "15k" in name and "wheel" not in name:
+        if "wheel" not in name and "virtual" not in name:
             return result_set["individual_result_set_id"]
     return sets[0]["individual_result_set_id"]
 
 
-def fetch_page(event_id, result_set_id, page, per_page=500):
-    url = f"{BASE_URL}/race/{RACE_ID}/results/get-results"
+def fetch_page(
+    race_id, event_id, result_set_id, page, api_key, api_secret, per_page=500
+):
+    url = f"{BASE_URL}/race/{race_id}/results/get-results"
     resp = requests.get(
         url,
         params=_params(
+            api_key,
             {
                 "event_id": event_id,
                 "individual_result_set_id": result_set_id,
@@ -66,13 +70,10 @@ def fetch_page(event_id, result_set_id, page, per_page=500):
                 "page": page,
             }
         ),
-        headers=_headers(),
+        headers=_headers(api_secret),
         timeout=30,
     )
-    resp.raise_for_status()
-    data = resp.json()
-    if "error" in data:
-        raise RuntimeError(data["error"].get("error_msg", "RunSignup results error"))
+    data = _response_json(resp)
 
     results = data.get("individual_results", {}).get("results_individual")
     if results is not None:
@@ -89,8 +90,7 @@ def parse_result(raw):
     user = raw.get("user", {})
     addr = user.get("address", {})
     net_time = raw.get("chip_time") or raw.get("clock_time") or raw.get("time") or ""
-    if net_time and net_time.startswith("0") and ":" in net_time:
-        net_time = net_time.lstrip("0") or "0"
+    net_time = normalize_seed_time(net_time) or ""
     return {
         "first_name": (user.get("first_name") or raw.get("first_name") or "").strip(),
         "last_name": (user.get("last_name") or raw.get("last_name") or "").strip(),
@@ -104,8 +104,13 @@ def parse_result(raw):
     }
 
 
-def import_year(year, event_id, result_set_id=None):
-    result_set_id = result_set_id or get_result_set_id(event_id)
+def import_year(
+    race_id, race_name, year, event_id, event_name, distance,
+    api_key, api_secret, result_set_id=None
+):
+    result_set_id = result_set_id or get_result_set_id(
+        race_id, event_id, api_key, api_secret
+    )
     if result_set_id is None:
         return {
             "year": year,
@@ -117,7 +122,9 @@ def import_year(year, event_id, result_set_id=None):
     all_results = []
     page = 1
     while True:
-        page_data = fetch_page(event_id, result_set_id, page)
+        page_data = fetch_page(
+            race_id, event_id, result_set_id, page, api_key, api_secret
+        )
         if not page_data:
             break
         all_results.extend(page_data)
@@ -135,8 +142,9 @@ def import_year(year, event_id, result_set_id=None):
         conn.execute(
             """
             INSERT OR REPLACE INTO past_results
-            (year, event_id, first_name, last_name, age, gender, city, net_time, bib_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (year, event_id, first_name, last_name, age, gender, city, net_time,
+             bib_number, race_id, race_name, event_name, distance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 year,
@@ -148,6 +156,10 @@ def import_year(year, event_id, result_set_id=None):
                 r["city"],
                 r["net_time"],
                 r["bib_number"],
+                race_id,
+                race_name,
+                event_name,
+                distance,
             ),
         )
         inserted += 1
@@ -162,17 +174,22 @@ def import_year(year, event_id, result_set_id=None):
     }
 
 
-def _run_import():
+def _run_import(race_id, race_name, events, api_key, api_secret):
     _import_state["running"] = True
     _import_state["completed"] = []
     _import_state["errors"] = []
     _import_state["last_error_detail"] = None
-    for event in BOILERMAKER_15K_EVENTS:
+    _import_state["total_events"] = len(events)
+    for event in events:
         year = event["year"]
         event_id = event["event_id"]
         _import_state["current_year"] = year
         try:
-            summary = import_year(year, event_id, event.get("result_set_id"))
+            summary = import_year(
+                race_id, race_name, year, event_id, event.get("name", ""),
+                event.get("distance", ""), api_key, api_secret,
+                event.get("result_set_id")
+            )
             _import_state["completed"].append(summary)
             if "error" in summary:
                 _import_state["errors"].append(summary)
@@ -186,10 +203,14 @@ def _run_import():
     _import_state["current_year"] = None
 
 
-def start_import_background():
+def start_import_background(race_id, race_name, events, api_key, api_secret):
     if _import_state["running"]:
         return {"error": "import already running"}
-    t = threading.Thread(target=_run_import, daemon=True)
+    t = threading.Thread(
+        target=_run_import,
+        args=(race_id, race_name, events, api_key, api_secret),
+        daemon=True,
+    )
     t.start()
     return {"started": True}
 
@@ -199,16 +220,22 @@ def get_import_status():
         "running": _import_state["running"],
         "current_year": _import_state["current_year"],
         "completed_years": [s["year"] for s in _import_state["completed"]],
-        "total_years": len(BOILERMAKER_15K_EVENTS),
+        "total_years": _import_state["total_events"],
         "errors": _import_state["errors"],
         "last_error_detail": _import_state["last_error_detail"],
     }
 
 
-def count_imported_years():
+def count_imported_years(race_id=None):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT year, COUNT(*) as count FROM past_results GROUP BY year ORDER BY year DESC"
-    ).fetchall()
+    if race_id is None:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'race_id'"
+        ).fetchone()
+        race_id = int(row["value"]) if row else 13089
+    rows = conn.execute("""
+        SELECT year, COUNT(*) as count FROM past_results
+        WHERE race_id = ? GROUP BY year ORDER BY year DESC
+    """, (race_id,)).fetchall()
     conn.close()
     return {r["year"]: r["count"] for r in rows}
