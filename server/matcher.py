@@ -89,18 +89,25 @@ def load_history():
     history = [dict(row) for row in all_rows]
     conn.close()
     by_last_name = defaultdict(list)
+    by_last_prefix = defaultdict(list)
     for result in history:
         last_name = (result.get("last_name") or "").lower().strip()
         if last_name:
             by_last_name[last_name].append(result)
-    return history, by_last_name
+            by_last_prefix[last_name[:3]].append(result)
+    return history, by_last_name, by_last_prefix
 
 
 def find_past_results(
-    participant, leeway_seconds=300, history=None, history_by_last_name=None
+    participant, leeway_seconds=300, history=None, history_by_last_name=None,
+    history_by_last_prefix=None
 ):
-    if history is None or history_by_last_name is None:
-        history, history_by_last_name = load_history()
+    if (
+        history is None
+        or history_by_last_name is None
+        or history_by_last_prefix is None
+    ):
+        history, history_by_last_name, history_by_last_prefix = load_history()
 
     p_first = (participant.get("first_name") or "").strip()
     p_last = (participant.get("last_name") or "").strip()
@@ -113,7 +120,7 @@ def find_past_results(
     exact_last_name = p_last.lower()
     candidates = history_by_last_name.get(exact_last_name)
     if candidates is None:
-        candidates = history
+        candidates = history_by_last_prefix.get(exact_last_name[:3], [])
 
     matches = []
     for r in candidates:
@@ -244,16 +251,16 @@ def enrich_participants(leeway_seconds=300, limit=None, range_start=None, range_
     elif limit is not None:
         participants = participants[:max(0, int(limit))]
 
-    history, history_by_last_name = load_history()
+    history, history_by_last_name, history_by_last_prefix = load_history()
     results = []
     for p in participants:
         enriched = find_past_results(
-            p, leeway_seconds, history, history_by_last_name
+            p, leeway_seconds, history, history_by_last_name,
+            history_by_last_prefix
         )
         results.append(
             {
                 **p,
-                "past_results": enriched["matches"],
                 "past_best": enriched["past_best"],
                 "past_best_year": enriched["past_best_year"],
                 "status": enriched["status"],

@@ -426,7 +426,14 @@ def enrich_one():
         p["runsignup_checked"] = 1
     leeway = int(leeway_row["value"]) if leeway_row else 300
     enriched = find_past_results(p, leeway)
-    return {**p, **enriched}
+    return {
+        **p,
+        "past_results": enriched["matches"],
+        "past_best": enriched["past_best"],
+        "past_best_year": enriched["past_best_year"],
+        "status": enriched["status"],
+        "reason": enriched["reason"],
+    }
 
 
 @app.route("/override-status", methods=["POST"])

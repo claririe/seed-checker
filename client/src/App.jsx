@@ -761,6 +761,8 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
   const [expanded, setExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const built = normalizeSeedTime(pendingSeed)
   const currentBuilt = normalizeSeedTime(currentSeed)
@@ -772,7 +774,20 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
 
   function handleRowClick(e) {
     if (e.target.closest("input") || e.target.closest("button") || e.target.closest("a")) return
-    setExpanded(x => !x)
+    const opening = !expanded
+    setExpanded(opening)
+    if (opening && enriched && detail === null && !detailLoading) {
+      setDetailLoading(true)
+      apiFetch("/enrich-one", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ registration_id: p.registration_id }),
+      })
+        .then(r => responseData(r, "history failed"))
+        .then(data => setDetail(data))
+        .catch(() => setDetail({ past_results: [], reason: "Unable to load history" }))
+        .finally(() => setDetailLoading(false))
+    }
   }
 
   function handleSave(seedValue = pendingSeed) {
@@ -799,7 +814,10 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ registration_id: p.registration_id, seed_time: normalized })
-          }).then(r => responseData(r, "refresh failed")).then(onUpdate).catch(() => { })
+          }).then(r => responseData(r, "refresh failed")).then(data => {
+            setDetail(data)
+            onUpdate(data)
+          }).catch(() => { })
         }
       })
       .catch(() => { setSaving(false); setSaveMsg("error") })
@@ -887,13 +905,15 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
         <tr className="row-detail">
           <td colSpan={colSpan}>
             <div className="detail-wrap">
-              {enriched && p.past_results?.length > 0 ? (
+              {enriched && detailLoading ? (
+                <div className="detail-empty">loading history...</div>
+              ) : enriched && detail?.past_results?.length > 0 ? (
                 <>
-                  {p.reason && <div className="detail-reason">{p.reason}</div>}
+                  {detail.reason && <div className="detail-reason">{detail.reason}</div>}
                   <table className="history-table">
                     <thead><tr><th>year</th><th>race</th><th>time</th><th>bib</th><th>age</th><th>city</th></tr></thead>
                     <tbody>
-                      {p.past_results.map((r, i) => (
+                      {detail.past_results.map((r, i) => (
                         <tr key={i}>
                           <td>{r.year}</td>
                           <td>{r.race_name || r.event_name || "—"}</td>
