@@ -115,7 +115,7 @@ def import_year(
         return {
             "year": year,
             "event_id": event_id,
-            "error": "no result sets found",
+            "skipped": True,
             "inserted": 0,
         }
 
