@@ -4,5 +4,6 @@ gunicorn
 openpyxl
 pandas
 python-dotenv
+psycopg[binary]
 rapidfuzz
 requests

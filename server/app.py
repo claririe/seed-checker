@@ -2,6 +2,9 @@ from flask import Flask, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
+
+load_dotenv()
+
 from runsignup import (
     get_participants,
     get_race,
@@ -10,17 +13,17 @@ from runsignup import (
     race_options,
     update_seed_time,
 )
-from database import init_db, get_db, normalize_seed_time
+from database import init_db, get_db, normalize_seed_time, upsert_setting
 import pandas as pd
 import io
 import re
 from results import start_import_background, get_import_status, count_imported_years
 from matcher import enrich_participants, find_past_results, time_to_seconds
 
-load_dotenv()
 init_db()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 frontend_origin = os.getenv(
     "FRONTEND_ORIGIN", "https://seed-checker-rho.vercel.app"
 )
@@ -65,10 +68,7 @@ def save_workspace(values):
         "race_id", "event_id", "question_id", "race_name", "event_name",
         "event_distance",
     ):
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, str(values.get(key, ""))),
-        )
+        upsert_setting(conn, key, values.get(key, ""))
     conn.commit()
     conn.close()
 
@@ -76,6 +76,16 @@ def save_workspace(values):
 def year_from_start_time(value):
     match = re.search(r"\b(?:19|20)\d{2}\b", value or "")
     return int(match.group()) if match else None
+
+
+def clean_cell(value):
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 @app.route("/ping")
@@ -88,9 +98,10 @@ def get_participants_route():
     conn = get_db()
     rows = conn.execute("""
         SELECT registration_id, first_name, last_name, age, gender, city, state,
-               uploaded_seed, runsignup_seed, runsignup_checked, override_status
+               uploaded_seed, runsignup_seed, runsignup_checked, reviewed,
+               override_status
         FROM participants
-        ORDER BY CASE WHEN runsignup_checked = 1
+        ORDER BY CASE WHEN runsignup_checked
                       THEN runsignup_seed ELSE uploaded_seed END ASC
     """).fetchall()
     conn.close()
@@ -132,7 +143,7 @@ def update_seed():
     conn.execute(
         """
         UPDATE participants
-        SET runsignup_seed = ?, runsignup_checked = 1
+        SET runsignup_seed = ?, runsignup_checked = TRUE
         WHERE registration_id = ?
         """,
         (seed_time, body["registration_id"]),
@@ -144,6 +155,8 @@ def update_seed():
 
 @app.route("/upload-csv", methods=["POST"])
 def upload_csv():
+    if not runsignup_credentials():
+        return {"error": "RunSignup API key and secret are required"}, 401
     if "file" not in request.files or not request.files["file"].filename:
         return {"error": "select a CSV or Excel file"}, 400
     file = request.files["file"]
@@ -189,12 +202,12 @@ def upload_csv():
             """,
             (
                 registration_id,
-                row.get("First Name"),
-                row.get("Last Name"),
-                row.get("Age"),
-                row.get("Gender"),
-                row.get("City"),
-                row.get("State"),
+                clean_cell(row.get("First Name")),
+                clean_cell(row.get("Last Name")),
+                clean_cell(row.get("Age")),
+                clean_cell(row.get("Gender")),
+                clean_cell(row.get("City")),
+                clean_cell(row.get("State")),
                 seed_time,
             ),
         )
@@ -206,7 +219,10 @@ def upload_csv():
             registration_ids,
         )
     conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('participant_source', 'upload')"
+        """
+        INSERT INTO settings (key, value) VALUES ('participant_source', 'upload')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """
     )
     conn.commit()
     conn.close()
@@ -253,8 +269,8 @@ def check_participants():
     config = workspace()
     conn = get_db()
     unchecked = conn.execute(
-        "SELECT COUNT(*) FROM participants WHERE runsignup_checked = 0"
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS count FROM participants WHERE NOT runsignup_checked"
+    ).fetchone()["count"]
     conn.close()
     if unchecked:
         try:
@@ -273,7 +289,7 @@ def check_participants():
         local_ids = [
             row["registration_id"]
             for row in conn.execute(
-                "SELECT registration_id FROM participants WHERE runsignup_checked = 0"
+                "SELECT registration_id FROM participants WHERE NOT runsignup_checked"
             ).fetchall()
         ]
         for registration_id in local_ids:
@@ -282,7 +298,7 @@ def check_participants():
                 continue
             conn.execute(
                 """
-                UPDATE participants SET runsignup_seed = ?, runsignup_checked = 1
+                UPDATE participants SET runsignup_seed = ?, runsignup_checked = TRUE
                 WHERE registration_id = ?
                 """,
                 (
@@ -368,7 +384,7 @@ def sync_participants():
             INSERT INTO participants
             (registration_id, first_name, last_name, age, gender, city, state,
              runsignup_seed, runsignup_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE)
             ON CONFLICT(registration_id) DO UPDATE SET
                 first_name = excluded.first_name,
                 last_name = excluded.last_name,
@@ -377,7 +393,7 @@ def sync_participants():
                 city = excluded.city,
                 state = excluded.state,
                 runsignup_seed = excluded.runsignup_seed,
-                runsignup_checked = 1
+                runsignup_checked = TRUE
         """, (
             registration_id,
             participant["first_name"], participant["last_name"],
@@ -394,7 +410,10 @@ def sync_participants():
         conn.execute("DELETE FROM participants")
     conn.execute("UPDATE participants SET uploaded_seed = NULL")
     conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('participant_source', 'sync')"
+        """
+        INSERT INTO settings (key, value) VALUES ('participant_source', 'sync')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """
     )
     conn.commit()
     conn.close()
@@ -409,7 +428,8 @@ def enrich_one():
     row = conn.execute(
         """
         SELECT registration_id, first_name, last_name, age, gender, city, state,
-               uploaded_seed, runsignup_seed, runsignup_checked, override_status
+               uploaded_seed, runsignup_seed, runsignup_checked, reviewed,
+               override_status
         FROM participants WHERE registration_id = ?
         """,
         (reg_id,),
@@ -423,7 +443,7 @@ def enrich_one():
     p = dict(row)
     if "seed_time" in body:
         p["runsignup_seed"] = normalize_seed_time(body["seed_time"])
-        p["runsignup_checked"] = 1
+        p["runsignup_checked"] = True
     leeway = int(leeway_row["value"]) if leeway_row else 300
     enriched = find_past_results(p, leeway)
     return {
@@ -438,6 +458,8 @@ def enrich_one():
 
 @app.route("/override-status", methods=["POST"])
 def override_status():
+    if not runsignup_credentials():
+        return {"error": "RunSignup API key and secret are required"}, 401
     body = request.get_json()
     reg_id = body.get("registration_id")
     new_status = body.get("override_status")
@@ -447,16 +469,36 @@ def override_status():
     if new_status not in valid:
         return {"error": f"invalid status '{new_status}'"}, 400
     conn = get_db()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE participants SET override_status = ? WHERE registration_id = ?",
         (new_status, reg_id),
     )
-    if conn.execute("SELECT changes()").fetchone()[0] == 0:
+    if cursor.rowcount == 0:
         conn.close()
         return {"error": "participant not found"}, 404
     conn.commit()
     conn.close()
     return {"registration_id": reg_id, "override_status": new_status}
+
+
+@app.route("/reviewed-status", methods=["POST"])
+def reviewed_status():
+    if not runsignup_credentials():
+        return {"error": "RunSignup API key and secret are required"}, 401
+    body = request.get_json()
+    reg_id = body.get("registration_id")
+    reviewed = bool(body.get("reviewed"))
+    conn = get_db()
+    cursor = conn.execute(
+        "UPDATE participants SET reviewed = ? WHERE registration_id = ?",
+        (reviewed, reg_id),
+    )
+    if cursor.rowcount == 0:
+        conn.close()
+        return {"error": "participant not found"}, 404
+    conn.commit()
+    conn.close()
+    return {"registration_id": reg_id, "reviewed": reviewed}
 
 
 @app.route("/settings")
@@ -469,15 +511,14 @@ def get_settings():
 
 @app.route("/settings", methods=["POST"])
 def update_settings():
+    if not runsignup_credentials():
+        return {"error": "RunSignup API key and secret are required"}, 401
     body = request.get_json()
     if not body:
         return {"error": "no body"}, 400
     conn = get_db()
     for key, value in body.items():
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, str(value)),
-        )
+        upsert_setting(conn, key, value)
     conn.commit()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     conn.close()

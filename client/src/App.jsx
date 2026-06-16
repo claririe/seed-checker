@@ -266,11 +266,11 @@ export default function App() {
 
   function handleUpload(e) {
     const file = e.target.files[0]
-    if (!file) return
+    if (!file || !credentialsReady) return
     setUploadMsg("uploading...")
     const fd = new FormData()
     fd.append("file", file)
-    apiFetch("/upload-csv", { method: "POST", body: fd })
+    apiFetch("/upload-csv", { method: "POST", body: fd }, true)
       .then(r => responseData(r, "upload failed"))
       .then(d => {
         setUploadMsg(`${d.inserted} entries loaded`)
@@ -337,13 +337,13 @@ export default function App() {
 
   function saveLeeway(val) {
     const n = parseInt(val)
-    if (isNaN(n) || n < 0) return
+    if (isNaN(n) || n < 0 || !credentialsReady) return
     setLeeway(String(n))
     apiFetch("/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ leeway_seconds: String(n) })
-    }).catch(() => { })
+    }, true).catch(() => { })
   }
 
   function loadEnriched() {
@@ -403,6 +403,8 @@ export default function App() {
     const statusMatches = filter === "ALL"
       || (filter === "NULL_SEED" && seedSeconds(effectiveSeed(p)) === null)
       || (filter === "OVERRIDDEN" && Boolean(p.override_status))
+      || (filter === "DONE" && Boolean(p.reviewed))
+      || (filter === "NOT_DONE" && !p.reviewed)
       || (p.override_status || p.status || "") === filter
     return statusMatches && (!activeRange || rangeIncludes(p, activeRange))
   })
@@ -411,6 +413,8 @@ export default function App() {
   const counts = {
     ALL: participants.length,
     OVERRIDDEN: participants.filter(p => p.override_status).length,
+    DONE: participants.filter(p => p.reviewed).length,
+    NOT_DONE: participants.filter(p => !p.reviewed).length,
     NULL_SEED: participants.filter(p => seedSeconds(effectiveSeed(p)) === null).length,
   }
   for (const k of ["GOOD", "LIAR", "REVIEW"]) {
@@ -546,7 +550,8 @@ export default function App() {
                   disabled={!credentialsReady || !workspaceReady || syncing}>
                   {syncing ? "syncing..." : "sync"}
                 </button>
-                <button className="btn" onClick={() => fileRef.current?.click()}>
+                <button className="btn" onClick={() => fileRef.current?.click()}
+                  disabled={!credentialsReady}>
                   upload
                 </button>
                 <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls"
@@ -637,11 +642,11 @@ export default function App() {
             <div className="review-tools">
               <span className="control-label">filters</span>
               <div className="filter-row">
-                {["ALL", "GOOD", "LIAR", "REVIEW", "OVERRIDDEN", "NULL_SEED"].map(f => (
+                {["ALL", "GOOD", "LIAR", "REVIEW", "OVERRIDDEN", "DONE", "NOT_DONE", "NULL_SEED"].map(f => (
                   <button key={f}
                     className={`filter-btn ${filter === f ? "filter-active" : ""} filter-${f}`}
                     onClick={() => selectFilter(f)}>
-                    {f === "NULL_SEED" ? "NULL SEED" : f}
+                    {f === "NULL_SEED" ? "NULL SEED" : f === "NOT_DONE" ? "NOT DONE" : f}
                     <span className="filter-count">{counts[f]}</span>
                   </button>
                 ))}
@@ -689,6 +694,7 @@ export default function App() {
                 {showUploadedSeed && <th>uploaded seed</th>}
                 <th>RunSignup seed <span className="th-note">H:MM:SS</span></th>
                 {enriched && <><th>status</th><th>past best</th><th>links</th></>}
+                {enriched && <th>done</th>}
                 <th>runsignup</th>
               </tr>
             </thead>
@@ -761,7 +767,11 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
   const [expanded, setExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState(null)
-  const [detail, setDetail] = useState(null)
+  const [detail, setDetail] = useState(
+    p.past_results !== undefined
+      ? { past_results: p.past_results, reason: p.reason }
+      : null
+  )
   const [detailLoading, setDetailLoading] = useState(false)
 
   const built = normalizeSeedTime(pendingSeed)
@@ -770,7 +780,7 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
   const canUpdate = built !== null
   const label = p.override_status || p.status || ""
   const sc = STATUS_COLORS[label] || {}
-  const colSpan = (enriched ? 10 : 7) + (showUploadedSeed ? 1 : 0)
+  const colSpan = (enriched ? 11 : 7) + (showUploadedSeed ? 1 : 0)
 
   function handleRowClick(e) {
     if (e.target.closest("input") || e.target.closest("button") || e.target.closest("a")) return
@@ -829,8 +839,19 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ registration_id: p.registration_id, override_status: send })
-    }).then(r => responseData(r, "override failed"))
+    }, true).then(r => responseData(r, "override failed"))
       .then(d => onUpdate({ ...p, override_status: d.override_status }))
+      .catch(() => { })
+  }
+
+  function handleReviewed() {
+    const reviewed = !p.reviewed
+    apiFetch("/reviewed-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ registration_id: p.registration_id, reviewed })
+    }, true).then(r => responseData(r, "done failed"))
+      .then(d => onUpdate({ ...p, reviewed: d.reviewed }))
       .catch(() => { })
   }
 
@@ -887,6 +908,12 @@ function ParticipantRow({ participant: p, index, enriched, onUpdate, credentials
               title="Search MileSplit via Google" onClick={e => e.stopPropagation()}>ms</a>
             <a href={athleticNetUrl} target="_blank" rel="noreferrer" className="link-btn"
               title="Search Athletic.net via Google" onClick={e => e.stopPropagation()}>anet</a>
+          </td>
+          <td className="col-done">
+            <button className={`done-btn ${p.reviewed ? "done-active" : ""}`}
+              onClick={e => { e.stopPropagation(); handleReviewed() }}>
+              {p.reviewed ? "done" : "mark"}
+            </button>
           </td>
         </>}
         <td className="col-action">

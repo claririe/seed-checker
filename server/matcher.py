@@ -213,9 +213,9 @@ def enrich_participants(leeway_seconds=300, limit=None, range_start=None, range_
     rows = conn.execute("""
         SELECT registration_id, first_name, last_name, age, gender,
                city, state, uploaded_seed, runsignup_seed,
-               runsignup_checked, override_status
+               runsignup_checked, reviewed, override_status
         FROM participants
-        ORDER BY CASE WHEN runsignup_checked = 1
+        ORDER BY CASE WHEN runsignup_checked
                       THEN runsignup_seed ELSE uploaded_seed END ASC
     """).fetchall()
     conn.close()

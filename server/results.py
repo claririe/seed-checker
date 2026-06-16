@@ -141,10 +141,18 @@ def import_year(
             continue
         conn.execute(
             """
-            INSERT OR REPLACE INTO past_results
+            INSERT INTO past_results
             (year, event_id, first_name, last_name, age, gender, city, net_time,
              bib_number, race_id, race_name, event_name, distance)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(race_id, event_id, first_name, last_name, age, gender)
+            DO UPDATE SET
+                city = excluded.city,
+                net_time = excluded.net_time,
+                bib_number = excluded.bib_number,
+                race_name = excluded.race_name,
+                event_name = excluded.event_name,
+                distance = excluded.distance
         """,
             (
                 year,
